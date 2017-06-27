@@ -1,102 +1,117 @@
-function [U, dcovs] = dca(X, varargin)
-% function description goes here
+function [U, dcovs] = dca(Xs, varargin)
+% [U, dcovs] = dca(Xs, Ds, 'Option', value, ...)
+%
+% DESCRIPTION:
+%   DCA identifies linear projections in sets of variables that are related to
+%       one another, linearly or nonlinearly.  DCA returns a loading matrix
+%       U{iset} for each set of variables, as well as the distance covariances
+%       dcovs for each dimension.
 %
 % INPUTS:
-%
-%   X: (1 x M cell), data, M datasets
-%   D (optional): (1 x N cell), distance matrices (wanting to be compared to X, but
-%       not optimized, e.g., a stimulus matrix
+%   Xs: (1 x M cell), data, M datasets where Xs{iset} is num_variables x num_samples
+%           Note: Each set can have a different number of variables,
+%           but must have the same number of samples.
+%   Ds (optional): (1 x N cell), distance matrices of N datasets for which dimensions
+%           are *not* identified, but are related to dimensions of Xs
+%           Ds{jset} is num_samples x num_samples  (and must have the same
+%           number of samples as those in Xs
 %   
-%   Additional arguments:
-%       e.g. dca(X, D, 'num_iters_per_dimension', 10)
-%   ('name', value)
-%
-%   ('num_iters_per_dimension', num_iters)
-%   ('num_iters_across_datasets', num_iters)
-%   ('percent_increase_criterion', percentage)
-%   ('num_dca_dimensions', num_dims)
-%   ('num_stoch_batch_samples', num_samples)
-%   ('u_0s', u_0s)
+%   Additional (optional) arguments:
+%       'num_iters_per_dataset': (1 x 1 scalar), number of optimization
+%           iterations for each dataset; default: 1
+%       'num_iters_foreach_dim': (1 x 1 scalar), number of optimization
+%           iterations for each dimension; default: 30
+%       'percent_increase_criterion': (1 x 1 scalar between 0 and 1),
+%           if next objective value of next iteration does not surpass
+%           a fraction of the previous object value, stop optimization;
+%           default: 0.01
+%       'num_dca_dimensions': (1 x 1 scalar), number of dimensions to
+%           optimize; default: num_variables
+%       'num_stoch_batch_samples': (1 x 1 scalar), number of samples
+%           in minibatch for stochastic gradient descent; default: 0
+%           Note: A value for this option triggers stochastic gradient
+%           descent. Use for large datasets (e.g., num_vars > 100, 
+%           num_samples > 5000). A good default: 100 samples.
+%       'num_samples_to_compute_stepwise_dcov': (1 x 1 scalar), for
+%           stochastic gradient descent, number of samples used to compute
+%           dcovs (for visualization purposes); default: 1000
 %
 % OUTPUTS:
+%   U: (1 x M cell), orthonormal loading matrices for M datasets in Xs.  
+%           U{iset} is (num_variables x num_dca_dimensions)
+%   dcovs: (1 x num_dca_dimensions vector), distance covariances for each
+%           dimension identified by DCA
+%
+% EXAMPLE:
+%   Xs{1} = randn(20,1000);
+%   Xs{2} = Xs{1}(1:5,:).^2;
+%   Ds{1} = squareform(pdist(Xs{1}(1,:)' + Xs{2}(1,:)'));
+%   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 10, 'percent_increase_criterion', 0.1);
+%   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 5, 'num_stoch_batch_samples', 100, ...
+%                   'num_samples_to_compute_stepwise_dcov', 1500, 'num_iters_foreach_dim', 20);
+%
+%
+% Reference: 
+%   BR Cowley, JD Semedo, A Zandvakili, A Kohn, MA Smith, BM Yu. "Distance
+%       covariance analysis." In AISTATS, pp. 242-251, 2017.
+%
+% Author: Benjamin R. Cowley, March 2017, bcowley@cs.cmu.edu
 
 
-    % PRE-PROCESSING 
-    p = parse_input(X, varargin);
-            % allows user to input name-value pairs
-    
-    check_input(p);
-    
-    preprocessing(p);
-    
-    % for each dca dim, optimize across datasets
-    %      idea: optimize only one dca dim at a time (fixing all others)
-    %       keep iterating until convergence
-    
-    % instantiate parameters
-    U = cell(1,num_datasets); % cell vector, dca dimensions for each dataset
-    dcovs = zeros(1,num_dca_dims); % vectors, dcovs for each dimension
-    for iset = 1:num_datasets
-        U_orth{iset} = eye(size(X{iset},1));  % keeps track of the orthogonal space of u
-    end
 
-    
-    % OPTIMIZATION
-    for idim = 1:num_dca_dims
-        
-        fprintf('dca dimension %d\n', idim);
-        
-        % initialization and pre-processing: compute the re-centered distance matrices
-        %   for each dim, and update as dimensions change
-        initialization(p);
+    %%% pre-processing
+        p = parse_input(Xs, varargin);   % allows user to input name-value pairs
 
+        check_input(p);  % checks user input, outputing warnings
 
-        % keep track of how much we increase the total dcov
-        if (p.Results.num_stoch_batch_samples > 0)
-            R = cell(1,num_datasets);
-            for iset = 1:num_datasets
-                R{iset} = get_recentered_matrix(u{iset}, X{iset}(:,1:1000));
-            end
-        end
-            
-        total_dcov = get_total_dcov(R,D);
-        total_dcov_old = total_dcov * 0.5;  % set old value to half, so it'll pass threshold
-        
-        itotal_dcov = 1; % keeps track of number of iterations after a run across all datasets
-        best_total_dcov = 0; % keeps track of greatest dcov (for stoch grad descent)
-        best_u = [];
-        
-        while (check_if_dcov_increases(p, total_dcov, total_dcov_old, itotal_dcov)) 
-                        % if dcov does not increase by a certain percentage
-                        % or if we reached the number of iterations, stop
+        preprocessing(p);  % initialize parameters
+   
+    %%% optimization
+        for idim = 1:num_dca_dims
 
-            fprintf('  step %d: dcov = %f\n', itotal_dcov, total_dcov);
-            fprintf('    sets:');
-            
-            r = randperm(num_datasets);  % randomize the order of datasets being optimized
+            fprintf('dca dimension %d\n', idim);
 
-            for iset = 1:num_datasets
-           
-                fprintf(' %d ', r(iset));
+            initialization(p);  % compute re-centered distance matrices based on u
+                        % and update stoch grad parameters
+
+            itotal_dcov = 1; % keeps track of number of iterations after a run across all datasets
+
+            while (check_if_dcov_increases(p, total_dcov, total_dcov_old, itotal_dcov)) 
+                            % if dcov does not increase by a certain percentage
+                            % or if we reached the number of iterations, stop
+
+                fprintf('  step %d: dcov = %f\n', itotal_dcov, total_dcov);
                 
+                r = randperm(num_datasets);  % randomize the order of datasets being optimized
+
                 if (p.Results.num_stoch_batch_samples == 0)
-                    % optimize over one dataset computing full gradient
-                    % with all samples
+                    %%% PROJECTED GRADIENT DESCENT, ALL SAMPLES
+
+                    fprintf('    sets:');
+                    for iset = 1:num_datasets
+
+                        fprintf(' %d ', r(iset));
+
+                        R_combined = get_recentered_combined(R((1:end)~=r(iset)), R_given);  % get combined recentered distance matrix (summed)
+                                
+                        % perform optimization for one dataset
+                        u{r(iset)} = dca_one(X{r(iset)}, Xij{r(iset)}, R_combined, u{r(iset)}, col_indices, p);
+                        
+                        R{r(iset)} = get_recentered_matrix(u{r(iset)}, X{r(iset)});
+                    end
                     
-                    % get combined recentered distance matrix (summed)
-                    R_combined = get_recentered_combined(R((1:end)~=r(iset)), D);
-                            % R_combined is T x T
-                            
-                    u{r(iset)} = dca_one(X{r(iset)}, Xij{r(iset)}, R_combined, u{r(iset)}, col_indices, p);
+                    total_dcov_old = total_dcov;
+                    total_dcov = get_total_dcov(R, D_given);
                 else
+                    %%% STOCHASTIC PROJECTED GRADIENT DESCENT, MINI-BATCH
                     
-                    % use stochastic gradient descent with momentum
                     random_sample_indices = randperm(num_samples);
                     batch_indices = 1:p.Results.num_stoch_batch_samples:num_samples;
-                    old_momented_gradf = 0;
-
+                    fprintf('    batches:');
+                    
                     for ibatch = 1:length(batch_indices)-1 % ignore last set of samples since randomized
 
+                        fprintf('.');
                         window = batch_indices(ibatch):batch_indices(ibatch+1)-1;
                         sample_indices = random_sample_indices(window);
 
@@ -104,138 +119,113 @@ function [U, dcovs] = dca(X, varargin)
                         for iset = 1:num_datasets
                             R{iset} = get_recentered_matrix(u{iset}, X{iset}(:,sample_indices));
                         end
-                        
-                        R_combined = get_recentered_combined(R((1:end)~=r(iset)), D);
 
-                        Xij = [];
                         for iset = 1:num_datasets
-                            % compute all combinations of differences between samples of X
-                            Xij{iset} = bsxfun(@minus, X{iset}(:,sample_indices), permute(X{iset}(:,sample_indices), [1 3 2]));
-                            Xij{iset} = reshape(-Xij{iset}, size(X{iset},1), []);
-                        end
-                        
-                        [u{r(iset)}, momented_gradf{r(iset)}] = dca_one_stoch(X{r(iset)}(:,sample_indices), ...
-                            Xij{r(iset)}, R_combined, u{r(iset)}, ...
-                            stoch_learning_rate, momented_gradf{r(iset)}, col_indices);
+                            R_combined_sampled = get_recentered_combined(R((1:end) ~= r(iset)), R_given(sample_indices, sample_indices));
+                            Xij_sampled = get_Xij_randomlysampled(X{r(iset)}(:,sample_indices));
 
+                            % perform optimization for one dataset
+                            [u{r(iset)}, momented_gradf{r(iset)}] = dca_one_stoch(X{r(iset)}(:,sample_indices), ...
+                                Xij_sampled, R_combined_sampled, u{r(iset)}, ...
+                                stoch_learning_rate, momented_gradf{r(iset)}, col_indices);
+
+                            R{r(iset)} = get_recentered_matrix(u{r(iset)}, X{r(iset)}(:,sample_indices));
+                        end
                     end
 
+                    total_dcov_old = total_dcov;
+                    total_dcov = get_total_dcov_randomlysampled(u, X, D_given, p);
+                    
+                    stoch_learning_rate = 0.9 * stoch_learning_rate;  % other forms of learning rates possible, like 1/sqrt(itotal_dcov)
                 end
 
-                if (p.Results.num_stoch_batch_samples == 0)
-                    R{r(iset)} = get_recentered_matrix(u{r(iset)}, X{r(iset)});
-                end
+                itotal_dcov = itotal_dcov + 1;
+                fprintf('\n');
+
             end
-            fprintf('\n');
+
+            dcovs(idim) = total_dcov;
             
-            % update dcov values
-            total_dcov_old = total_dcov;
-            
-            if (p.Results.num_stoch_batch_samples > 0)
-                R = cell(1,num_datasets);
-                for iset = 1:num_datasets
-                    R{iset} = get_recentered_matrix(u{iset}, X{iset}(:,1:1000));
-                end
+            %%% PROJECT DATA ONTO ORTHOGONAL SUBSPACE OF U
                 
-                % update learning rate (for stochastic gradient descent)
-                stoch_learning_rate = 0.9 * stoch_learning_rate; %1 / sqrt(itotal_dcov);
-            end
+                % ensure that the u are normalized
+                for iset = 1:num_datasets
+                    u{iset} = u{iset} ./ norm(u{iset});
+                end
+
+                % project identified dca dimension into original space
+                for iset = 1:num_datasets
+                    U{iset}(:,idim) = U_orth{iset} * u{iset};
+                end
+
+                % project data onto null space of newly found dca dimensions 
+                if (idim ~= num_dca_dims)
+                    for iset = 1:num_datasets
+                        [Q,R] = qr([U{iset}(:,1:idim) ...
+                                randn(size(U{iset},1), size(U{iset},1)-idim)]);
+                        U_orth{iset} = Q(:,(idim+1):end);
+
+                        X{iset} = U_orth{iset}' * X_orig{iset};
                         
-            total_dcov = get_total_dcov(R, D);
-            itotal_dcov = itotal_dcov + 1;
-
-
-
-            if (total_dcov > best_total_dcov)
-                best_total_dcov = total_dcov;
-                best_u = u;
-            end
-            
+                        if (p.Results.num_stoch_batch_samples == 0)
+                            Xij{iset} = U_orth{iset}' * Xij_orig{iset};  % only used for full gradient descent
+                        end
+                    end
+                end
         end
-        
 
+        % sort distance covariances/patterns, 
+        %       since it may not be in order if large noise
+        [dcovs, sorted_indices] = sort(dcovs, 'descend');
 
-        % choose the best parameters seen
-            total_dcov = best_total_dcov;
-            u = best_u;
-
-        
-        dcovs(idim) = total_dcov;
-       
-        % ensure that the u are normalized
         for iset = 1:num_datasets
-            u{iset} = u{iset} ./ norm(u{iset});
+            U{iset} = U{iset}(:,sorted_indices);
         end
         
-        % project identified dca dimension into original space
-        for iset = 1:num_datasets
-            U{iset}(:,idim) = U_orth{iset} * u{iset};
-        end
         
-        % project data onto null space of newly found dca dimensions 
-        if (idim == num_dca_dims)
-            break;  % last dimension, so no need to compute null space
-        end
-        for iset = 1:num_datasets
-            [Q,R] = qr([U{iset}(:,1:idim) ...
-                    randn(size(U{iset},1), size(U{iset},1)-idim)]);
-            U_orth{iset} = Q(:,(idim+1):end);
-
-            X{iset} = U_orth{iset}' * X_orig{iset};
-        end
-    end
-    
-    % sort distance covariances/patterns, 
-    %       since it may not be in order if large noise
-    [dcovs, sorted_indices] = sort(dcovs, 'descend');
-
-    for iset = 1:num_datasets
-        U{iset} = U{iset}(:,sorted_indices);
-    end
+        
+        
     
     
-    
-%%%%%%%%%%%%%%%%%%%%%%%%%
-% NESTED HELPER FUNCTIONS
-%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%
+    % NESTED HELPER FUNCTIONS
+    %%%%%%%%%%%%%%%%%%%%%%%%%
     
     function p = parse_input(X, vargs)
-        % parses input, in case user gives name-value pairs
+        % parses input, and extracts name-value pairs
         
         p = inputParser;  % creates parser object
         
         default_D = [];  % distance matrices
-        default_num_iters_per_dimension = 1;
-        default_num_iters_across_datasets = 100;
-        default_percent_increase_criterion = 0.05;  % stops when objective function increases fewer than 5% of current value
+        default_num_iters_per_dataset = 1;
+        default_num_iters_foreach_dim = 30;
+        default_percent_increase_criterion = 0.01;  % stops when objective function increases fewer than 1% of current value
         default_num_dca_dimensions = []; % number of dca dimensions to identify
         default_u_0s = [];  % how to intialize the dimensions before optimization
         default_num_stoch_batch_samples = 0;
-        
+        default_num_samples_to_compute_stepwise_dcov = 1000;
         
         addRequired(p, 'X');
         addOptional(p, 'D', default_D);
-        addParamValue(p, 'num_iters_per_dimension', default_num_iters_per_dimension);
-        addParamValue(p, 'num_iters_across_datasets', default_num_iters_across_datasets);
+        addParamValue(p, 'num_iters_per_dataset', default_num_iters_per_dataset);
+        addParamValue(p, 'num_iters_foreach_dim', default_num_iters_foreach_dim);
         addParamValue(p, 'percent_increase_criterion', default_percent_increase_criterion);
         addParamValue(p, 'num_dca_dimensions', default_num_dca_dimensions);
         addParamValue(p, 'num_stoch_batch_samples', default_num_stoch_batch_samples);
+        addParamValue(p, 'num_samples_to_compute_stepwise_dcov', default_num_samples_to_compute_stepwise_dcov);
         addParamValue(p, 'u_0s', default_u_0s);
         
-        % NOTE: addParamValue should be changed to addParameter...I have to
-        % use addParamValue because the ECE cmu cluster hasn't updated
-        % their matlab software...
+        % NOTE: addParamValue should be changed to addParameter...
+        %      addParamValue is for older matlab versions
         
         parse(p,X,vargs{:});  % parses input to get optional parameters
-            % now p.Results.X, etc.
-        
+            % to get input, use p.Results.X, etc.
     end
-
 
     function check_input(p)
         % make sure user input correct formats
         
-        % check X
+        %%% check X
             if (~iscell(p.Results.X) || size(p.Results.X,1) > 1 && size(p.Results.X,2) > 1) % check if X is a cell vector  
                 error('X (1 x num_datasets) should be a cell array, where X{iset} is (num_variables x num_datapoints)');
             end
@@ -246,38 +236,50 @@ function [U, dcovs] = dca(X, varargin)
             if (length(unique(num_datapoints)) ~= 1)  % there should only be one sample size
                 error('Dataset(s) in X do not contain the same number of datapoints. X{iset} (num_variables x num_datapoints), where num_datapoints is the same for each dataset (but num_variables can be different).');
             end
+            num_samples = size(p.Results.X{1},2);
             
-        % check D
+            isnan_found = false;
+            for iset = 1:num_datasets
+                isnan_found = isnan_found | any(any(isnan(p.Results.X{iset})));
+            end
+            if (isnan_found == true)
+                error('Dataset(s) in X contain NaNs. Remove samples with NaNs.');
+            end
+            
+        %%% check D
             if (~isempty(p.Results.D) && (~iscell(p.Results.D) || size(p.Results.D, 1) > 1 && size(p.Results.D, 2) > 1))
                 error('Dataset(s) in D do not contain the same number of datapoints. D{iset} (num_datapoints x num_datapoints) are distance matrices, where num_datapoints is the same for each dataset.');
             end
             
-        % check that X and D have more than just one dataset
-            if (length(p.Results.X) + length(p.Results.D) <= 1)
-                error('Not enough datasets in X and D.  The number of datasets (including distance matrices) should be at least two.');
+            isnan_found = false;
+            for iset = 1:length(p.Results.D)
+                isnan_found = isnan_found | any(any(isnan(p.Results.D{iset})));
+            end
+            if (isnan_found == true)
+                error('Dataset(s) in D contain NaNs. Remove samples with NaNs.');
             end
             
-        % check num_dca_dimensions
+        %%% check that X and D have more than just one dataset combined
+            if (length(p.Results.X) + length(p.Results.D) <= 1)
+                error('Not enough datasets in X and D.  The number of datasets (including given distance matrices) should be at least two.');
+            end
+            
+        %%% check num_dca_dimensions
             if (p.Results.num_dca_dimensions > min(num_vars))
                 error(sprintf('"num_dca_dimensions" must be less than or equal to %d, the minimum number of variables across datasets.', min(num_vars)));
             end
-       
     end
 
 
     function preprocessing(p)
-    %   - compute any fixed variables before optimization
-    %   - initialize any needed numbers
+        % - compute any fixed variables before optimization
+        % - initialize any needed quantities
     
-        X = p.Results.X;
-        X_orig = X;
+        X = p.Results.X;  % X will change as we optimize each dim
+        X_orig = X;   % X_orig will remain the original X
         
-        % find the number of datasets
-        num_datasets = length(X);
-        
-        % check how many dca dimensions there should be
-        %   for minimum number of dimensions across datasets
-        %   + user input
+        %%% check how many dca dimensions there should be
+        %   for minimum number of dimensions across datasets + user input
             num_dims_foreach_set = [];
             for iset = 1:num_datasets
                 num_dims_foreach_set = [num_dims_foreach_set size(X{iset},1)];
@@ -286,60 +288,78 @@ function [U, dcovs] = dca(X, varargin)
 
             if (~isempty(p.Results.num_dca_dimensions))
                 num_dca_dims = p.Results.num_dca_dimensions;
-            end
-        
-        % find the number of samples
-        num_samples = size(X{1},2);
-        
+            end        
 
-        % compute the recentered matrices for user input D
-        D = p.Results.D;
-        if (~isempty(D))
-            for iset = 1:length(D)
-                H = eye(size(D{iset})) - 1 / size(D{iset},1) * ones(size(D{iset}));
-                D{iset} = H * D{iset} * H;  % recenters matrix
-            end
-        end
-        
+        %%% compute the combined recentered matrices for given distance matrices
+            R_given = zeros(num_samples);
+            D_given = p.Results.D;
+            if (~isempty(D_given))
+                R_given = zeros(num_samples);
+                for iset = 1:length(D_given)
+                    H = eye(size(D_given{iset})) - 1 / size(D_given{iset},1) * ones(size(D_given{iset}));
+                    D_given{iset} = H * D_given{iset} * H;  % recenter D
+                    R_given = R_given + D_given{iset};
+                end
 
-        % prepare indices for column indices when subtracting off column means
+                R_given = R_given / length(D_given);
+            end
         
-        if (p.Results.num_stoch_batch_samples == 0)  % full gradient descent
-            col_indices = [];
-            for icol = 1:num_samples
-                col_indices = [col_indices icol:num_samples:num_samples^2];
+        %%% prepare indices for column indices when subtracting off distance matrix means
+            if (p.Results.num_stoch_batch_samples == 0)  % full gradient descent
+                col_indices = [];
+                for icol = 1:num_samples
+                    col_indices = [col_indices icol:num_samples:num_samples^2];
+                end
+            else     % stochastic gradient descent
+                col_indices = [];
+                for icol = 1:p.Results.num_stoch_batch_samples
+                    col_indices = [col_indices icol:p.Results.num_stoch_batch_samples:p.Results.num_stoch_batch_samples^2];
+                end
             end
-        else     % stochastic gradient descent
-            col_indices = [];
-            for icol = 1:p.Results.num_stoch_batch_samples
-                col_indices = [col_indices icol:p.Results.num_stoch_batch_samples:p.Results.num_stoch_batch_samples^2];
+
+        %%% initialize parameters
+            U = cell(1,num_datasets); % cell vector, dca dimensions for each dataset
+            dcovs = zeros(1,num_dca_dims); % vectors, dcovs for each dimension
+            for iset = 1:num_datasets
+                U_orth{iset} = eye(size(X{iset},1));  % keeps track of the orthogonal space of u
             end
-        end
+            
+        %%% compute Xij (num_neurons x num_samples^2) for each dataset, where Xij = X_i - X_j
+            if (p.Results.num_stoch_batch_samples == 0)  % only for full grad descent
+                Xij = [];
+                for iset = 1:num_datasets
+                    % compute all combinations of differences between samples of X
+                    Xij{iset} = bsxfun(@minus, X{iset}, permute(X{iset}, [1 3 2]));
+                    Xij{iset} = reshape(-Xij{iset}, size(X{iset},1), []);
+                end
+                Xij_orig = Xij;
+            end
 
     end
 
 
     function initialization(p)
-    %   initialize U, U_orth, and dcovs
-    %   U_orth keeps track of the null space of U
+        % initialize U, U_orth, and dcovs
+        % U_orth keeps track of the null space of U
         
-
+        %%% for first dim, initialize u with either user input or randomly
         for iset = 1:num_datasets
-            % initialize the weights of the dca dimensions either
-            %   randomly or with user's choice
-            if (~isempty(p.Results.u_0s) && size(p.Results.u_0s{iset},1) == size(X{iset},1))  % if user input initialized 
+            if (~isempty(p.Results.u_0s) && size(p.Results.u_0s{iset},1) == size(X{iset},1))  % if user input initialized weights for first dim
                 u{iset} = p.Results.u_0s{iset}(:,1);
             else
                 u{iset} = orth(randn(size(X{iset},1), 1));
             end
         end
 
-        % get initial recentered matrices for each dataset
+        %%% get initial recentered matrices for each dataset based on u
             if (p.Results.num_stoch_batch_samples == 0)  % only for full grad descent
                 R = cell(1,num_datasets);
                 for iset = 1:num_datasets
                     R{iset} = get_recentered_matrix(u{iset}, X{iset});
                 end
+                
+                total_dcov = get_total_dcov(R,D_given);
+                total_dcov_old = total_dcov * 0.5;  % set old value to half, so it'll pass threshold
             end
         
         % stochastic gradient descent initialization
@@ -349,22 +369,11 @@ function [U, dcovs] = dca(X, varargin)
                 for iset = 1:num_datasets
                     momented_gradf{iset} = zeros(size(u{iset}));
                 end
+
+                total_dcov = get_total_dcov_randomlysampled(u, X, D_given, p);
+                total_dcov_old = total_dcov * 0.5;
             end
-       
-        
-        % compute Xij for each dataset
-        if (p.Results.num_stoch_batch_samples == 0)  % only for full grad descent
-            Xij = [];
-            for iset = 1:num_datasets
-                % compute all combinations of differences between samples of X
-                Xij{iset} = bsxfun(@minus, X{iset}, permute(X{iset}, [1 3 2]));
-                Xij{iset} = reshape(-Xij{iset}, size(X{iset},1), []);
-            end
-        end
     end
-
-
-
 end
 
 
@@ -378,8 +387,8 @@ end
 
 function R = get_recentered_matrix(u, X)
     % computes the recentered distance matrix for each dataset
-    % u: num_variables x 1
-    % X: num_variables x num_datapoints
+    % u: (num_variables x 1),  weight vector
+    % X: (num_variables x num_datapoints), one dataset
 
     % compute distance matrix of (X projected onto u
         D = squareform(pdist((u' * X)'));
@@ -389,16 +398,14 @@ function R = get_recentered_matrix(u, X)
         R = H * D * H;  % recenters distance matrix
 end
 
-        % compute distance matrix of (X projected onto u)
 
         
-        
-        
+function total_dcov = get_total_dcov(R,D_given)
+    % compute the total distance covariance across all datasets
+    % R: (1 x num_datasets), re-centered matrices
+    % D_given: (1 x num_given_datasets), combined re-centered matrix for given distance matrices
 
-function total_dcov = get_total_dcov(R,D)
-% compute the total distance covariance across all datasets
-
-    R = [R D];
+    R = [R D_given];
     
     Rtotal = 0;
     T = size(R{1},1);
@@ -413,11 +420,39 @@ function total_dcov = get_total_dcov(R,D)
 end
 
 
+function total_dcov = get_total_dcov_randomlysampled(u, X, D_given, p)
+ % computes dcov for a random subsample (for stochastic gradient descent)
+ 
+
+    r = randperm(size(X{1},2));
+    sample_indices = r(1:min(length(r), p.Results.num_samples_to_compute_stepwise_dcov));
+    
+    T = length(sample_indices);  % T = number of subsamples
+    
+    R = cell(1,length(X) + length(D_given));
+    for iset = 1:length(X)
+        R{iset} = get_recentered_matrix(u{iset}, X{iset}(:,sample_indices));
+    end
+
+    for iset = 1:length(D_given)
+        R{iset + length(X)} = D_given{iset}(sample_indices, sample_indices);
+    end
+    
+    Rtotal = 0;
+    for iset = 1:length(R)
+        for jset = (iset+1):length(R)
+            Rtotal = Rtotal + sqrt(1/T^2 * R{iset}(:)' * R{jset}(:));  
+        end
+    end
+
+    total_dcov = Rtotal / ((length(R)-1)*length(R)/2);
+end
+
 
 function result = check_if_dcov_increases(p, total_dcov, total_dcov_old, itotal_dcov)
-% returns true if increase in dcov is greater than the percent threshold
-%   or if the number of iterations is less than iteration constraint
-% else returns false
+    % returns true if increase in dcov is greater than the percent threshold
+    %   or if the number of iterations is less than iteration constraint
+    % else returns false
 
     if (p.Results.num_stoch_batch_samples == 0) % full gradient descent
         percent_increase = abs(total_dcov - total_dcov_old)/abs(total_dcov_old);
@@ -425,182 +460,177 @@ function result = check_if_dcov_increases(p, total_dcov, total_dcov_old, itotal_
         if (total_dcov - total_dcov_old < 0)  % if value goes down, stop
             result = false;
         elseif (percent_increase >= p.Results.percent_increase_criterion && ...
-                    itotal_dcov <= p.Results.num_iters_across_datasets)
+                    itotal_dcov <= p.Results.num_iters_foreach_dim)
             result = true;
         else
             result = false;
         end
     else  % stochastic gradient descent...just check number of iterations
-        if (itotal_dcov <= p.Results.num_iters_across_datasets)
+        if (itotal_dcov <= p.Results.num_iters_foreach_dim)
             result = true;
         else
             result = false;
         end
     end
-
 end
 
 
-
-function R_combined = get_recentered_combined(R, D)
+function R_combined = get_recentered_combined(R, R_given)
     % compute the combined matrix of all recentered distance matrices
     % returns a matrix, where each element is a pointwise-sum of all R
-    % and D
+    % and D (remember, D is already re-centered)
 
     if (~isempty(R))
-        R_combined = zeros(size(R{1}));
+        R_combined = zeros(size(R{1}));  % if no given distance matrices, then R_given is zero matrix
+                            % R_given is already averaged across given datasets
     else
-        R_combined = zeros(size(D{1}));
+        R_combined = zeros(size(R_given));
     end
     
     for iset = 1:length(R)
-        R_combined = R_combined + R{iset};
+        R_combined = R_combined + R{iset}/length(R);
     end
     
-    for iset = 1:length(D)
-        R_combined = R_combined + D{iset};
+    if (~all(all(R_given==0))) % if R_given ~= 0, then D_given exists
+        R_combined = (R_combined + R_given)/2;
     end
-    
-    R_combined = R_combined / (length(R) + length(D));
 
+end
+
+
+function Xij_sampled = get_Xij_randomlysampled(X)
+% computes Xij for a subsample   (for stochastic gradient descent)
+
+    % compute all combinations of differences between samples of X
+    Xij_sampled = bsxfun(@minus, X, permute(X, [1 3 2]));
+    Xij_sampled = reshape(-Xij_sampled, size(X,1), []);
 end
 
 
 
 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%  DCA ONE - FULL GRADIENT DESCENT  %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
 function u = dca_one(X, Xij, R_combined, u_0, column_indices, p)
-%
-% [u, R] = dca_one(X, R_combined, u_0, p)
-%
-% performs distance covariance analysis for one dataset and one
-% 
-%
-% INPUT:
-%   X: (N x T), data in which we want to find the N x 1 dca dimension, where
-%       N is the number of variables, and T is the number of observations
-%   R_combined: (T x T), distance matrix of the other sets of variables
-%   u_0: (N x 1), initial guess for the dca dimension
-%   p: (1 x 1), inputParser object which contains user constraints, such
-%               as number of iterations
-%
-% OUTPUT:
-%   u: (N x 1), the dimension of 
-%           greatest distance covariance between D_X and R_combined
-%   R: (N x N), distance matrix of X with u
-%
+    % performs distance covariance analysis for one dataset and one given re-centered distance matrix
+    %       uses projected gradient descent
+    % 
+    %   X: (N x T), data in which we want to find the N x 1 dca dimension, where
+    %       N is the number of variables, and T is the number of samples
+    %   R_combined: (T x T), combined re-centered distance matrix of the other sets of variables
+    %   u_0: (N x 1), initial guess for the dca dimension
+    %   p: (1 x 1), inputParser object which contains user constraints, such
+    %               as number of iterations
+    %
+    %  returns:
+    %   u: (N x 1), the dimension of greatest distance covariance between D_X and R_combined
 
+    %%% PRE-PROCESSING
+        N = size(X,1);  % number of neurons
+        T = size(X,2);  % number of timepoints
+        
+        if (sum(var(X')) < 1e-10) % X has little variability left
+            u = randn(N,1);
+            u = u / norm(u);
+            return;
+        end
 
+        u = u_0;    % set u to be initial guess
+        
+    %%% OPTIMIZATION  
+        for istep = 1:p.Results.num_iters_per_dataset  % stop when num iters have been reached
 
-    N = size(X,1);  % number of neurons
-    T = size(X,2);  % number of timepoints
+            % COMPUTE GRAD DESCENT PARAMETERS
+                D_uXij = get_D_uXij(u);  % get distance matrix of current u
+                f_val = get_f(D_uXij);     % compute current function value and gradf for backtracking
+                gradf = get_gradf(u, D_uXij);  % compute gradient of current solution
 
-    % PRE-PROCESSING
+                t = 1;  % backtracking step size
 
-    if (sum(var(X')) < 1e-10) % X has little variability left
-        u = randn(N,1);
-        u = u / norm(u);
-        return;
-    end
+            % BACKTRACKING LINE SEARCH
+                % first check large intervals for t (so backtracking loop doesn't take forever)
+                for candidate_power = 1:9
+                    fprintf('.');
+                    if (~backtrack_check(u, f_val, gradf, 10^-candidate_power))
+                        break;
+                    else
+                        t = 10^-candidate_power;
+                    end
+                end
 
+                % find more nuanced t
+                while (backtrack_check(u, f_val, gradf, t) && t > 10^-9)
+                    t = 0.7 * t;
+                    fprintf('.')
+                end 
 
-    % OPTIMIZATION
-    u = u_0;    % set u to be initial guess
+            % PERFORM PROJECTED GRAD DESCENT
+                u_unnorm = u - t * gradf; % gradient descent step
 
-    for istep = 1:p.Results.num_iters_per_dimension  % stop when num iters have been reached
-
-        % COMPUTE GRAD DESCENT PARAMETERS
-        D_uXij = get_D_uXij(u);  % get distance matrix of current u
-        f_val = get_f(D_uXij);     % compute current function value and gradf for backtracking
-        gradf = get_gradf(u, D_uXij);
-
-        t = 1;  % backtracking step size
-
-        % first check large intervals for t (so backtracking loop doesn't
-        % take forever)
-        for candidate_power = 1:9
-            if (~backtrack_check(u, f_val, gradf, 10^-candidate_power))
-                break;
-            else
-                t = 10^-candidate_power;
-            end
+                norm_u = norm(u_unnorm); % project u_unnorm to the L2 unit ball
+                if (norm_u > 1)
+                    u = u_unnorm / norm_u;
+                else
+                    u = u_unnorm;   % allow solution to exist inside unit ball (for dca_one)
+                end
         end
 
         
-        while (backtrack_check(u, f_val, gradf, t) && t > 10^-9)
-            t = 0.7 * t;
-fprintf('.')
-        end 
-
-
-        % PERFORM PROJECTED GRAD DESCENT
-        u_unnorm = u - t * gradf; % gradient descent step
-
-        norm_u = norm(u_unnorm); % project u_unnorm to the L2 unit ball
-        if (norm_u > 1)
-            u = u_unnorm / norm_u;
-        else
-            u = u_unnorm;   % need to consider cases inside the L2 unit ball as well (to make convex candidate set)
-        end
-
-    end
-
-
-
-
-    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    % NESTED DCA_ONE HELPER FUNCTIONS
-    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % NESTED DCA_ONE HELPER FUNCTIONS %
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
     function D = get_D_uXij(u) 
         % compute distance matrix of (X projected onto u)
         
         D = squareform(pdist((u' * X)'));
-       
     end
-
 
     function f = get_f(D_uXij)
+        % compute objective function
+        
         H = eye(T) - 1/T * ones(T);
         A = H * D_uXij * H;  % recenters distance matrix
-        f = -sum(sum(R_combined .* A));
+        f = -R_combined(:)' * A(:);  % trying to minimize, so flip the sign!
     end
-
 
     function gradf = get_gradf(u, D_uXij)
+        % computes the gradient for dca_one...note there are some tricky matrix operations in here!
+        
+        %%% weight Xij
+            D_uXij(D_uXij == 0) = 1e-8; % add 1e-8 to avoid division by zero...other values
+                                        % do not seem to matter
+            % project Xij onto u
+            XijT_u = Xij' * u;
+        
+            % weight Xij by XijT_u ./ D_uXij(:)'
+            Xij_weighted = bsxfun(@times, Xij, (XijT_u ./ D_uXij(:))');
 
-        % first weight each i,jth element of XijXijT by 1/distance
-        D_uXij(D_uXij == 0) = 1e-8;  % add 1e-8 to avoid division by zero
-        
-        % project Xij onto u
-        XijT_u = Xij' * u;
-        
-        % weight Xij by XijT_u ./ D_uXij(:)'
-        Xij_weighted = bsxfun(@times, Xij, (XijT_u ./ D_uXij(:))');
-        
+        %%% subtract raw, column, and matrix means
+            Xij_row_means = blockproc(Xij_weighted, [N, T], @get_row_means);
+            Xij_col_means = Xij_row_means(:,column_indices);
+            Xij_matrix_mean = mean(Xij_weighted,2);
 
-        % subtract row, column, and matrix means
-        Xij_row_means = blockproc(Xij_weighted, [N, T], @get_row_means);
-        Xij_col_means = Xij_row_means(:,column_indices);
-        Xij_matrix_mean = mean(Xij_weighted,2);
-        
-        Xij_weighted = bsxfun(@plus, Xij_weighted - Xij_row_means - Xij_col_means, Xij_matrix_mean);
-        
+            Xij_weighted = bsxfun(@plus, Xij_weighted - Xij_row_means - Xij_col_means, Xij_matrix_mean);
 
-        % now need to linearly combine with B (similar way as with D)
-        gradf = - Xij_weighted * R_combined(:);
-
+        %%% linearly combine with R_combined
+            gradf = - Xij_weighted * R_combined(:);  % sign because we are minimizing negative dcov
     end
 
-
-
     function X_row = get_row_means(block_struct)
+        % for blockproc, compute means along rows of distance matrix
+        
         X_row = mean(block_struct.data,2);
         X_row = repmat(X_row, 1, size(block_struct.data,2));
     end
 
-
-
     function Gt = get_Gt(u, gradf, t)
+        % vector used for backtracking check with projected gradient descent
+        
         u_n = u - t * gradf;
         norm_u_n = norm(u_n);
         if (norm_u_n > 1)  % project to L2 unit ball
@@ -612,16 +642,13 @@ fprintf('.')
         Gt = 1/t * (u - u_norm);
     end
 
-
     function status = backtrack_check(u, f_next, gradf, t)
-        % lecture 8 of ryan tibs opti class
+        % check lecture 8 of ryan tibshirani opti class
         Gt = get_Gt(u, gradf, t);
 
         D_uXij_t = get_D_uXij(u - t * Gt);
         status = get_f(D_uXij_t) > f_next - t * gradf' * Gt + t/2 * Gt' * Gt;
     end
-
-
 end
 
 
@@ -630,117 +657,100 @@ end
 
 
 
-%%% DCA_STOCH...for stochastic gradient descent                        
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% DCA ONE STOCH - STOCHASTIC GRADIENT DESCENT %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%                   
                         
 function [u, momented_gradf] = dca_one_stoch(X, Xij, R_combined, u_0, learning_rate, old_momented_grad_f, column_indices)
-%
-% [u, R] = dca_one(X, R_combined, u_0, p)
-%
-% performs distance covariance analysis for one dataset and one other
-% re-centered distance matrix
-% 
-%
-% INPUT:
-%   X: (N x T), data in which we want to find the N x 1 dca dimension, where
-%       N is the number of variables, and T is the number of observations
-%   R_combined: (T x T), distance matrix of the other sets of variables
-%   u_0: (N x 1), initial guess for the dca dimension
-%   p: (1 x 1), inputParser object which contains user constraints, such
-%               as number of iterations
-%
-% OUTPUT:
-%   u: (N x 1), the dimension of 
-%           greatest distance covariance between D_X and R_combined
-%   R: (N x N), distance matrix of X with u
-%
+    % performs distance covariance analysis for one dataset and one given re-centered distance matrix
+    %       uses stochastic projected gradient descent
+    % 
+    %   X: (N x T), data in which we want to find the N x 1 dca dimension, where
+    %       N is the number of variables, and T is the number of samples
+    %   Xij: (N x T^2), vector differences between X samples
+    %   R_combined: (T x T), combined re-centered distance matrix of the other sets of variables
+    %   u_0: (N x 1), initial guess for the dca dimension
+    %   learning_rate: (1 x 1), current learning rate for stochastic gradient descent
+    %   old_momented_grad_f: (N x 1), previous gradient direction (used for momentum)
+    %   column_indices: (1 X T^2), used to subtract out the column means of the gradient
+    %
+    %  returns:
+    %   u: (N x 1), the dimension of greatest distance covariance between D_X and R_combined
+    %   momented_gradf
+
+    %%% PRE-PROCESSING
+        N = size(X,1);  % number of neurons
+        T = size(X,2);  % number of timepoints
+        
+        if (sum(var(X')) < 1e-10) % X has little variability left
+            u = randn(N,1);
+            u = u / norm(u);
+            R = get_D_uXij(u);
+
+            return;
+        end
+
+        u = u_0;    % set u to be initial guess
+        
+    %%% OPTIMIZATION
+        
+        % COMPUTE GRAD DESCENT PARAMETERS
+        momentum_weight = 1 - learning_rate;  % momentum term convex combination of learning_rate
+        D_uXij = get_D_uXij(u);  % get distance matrix of current u
+
+        % momentum
+        gradf = get_gradf(u, D_uXij);   % worked better than Nesterov accelerated gradient
+
+        % PERFORM PROJECTED GRAD DESCENT
+        momented_gradf = learning_rate * gradf + momentum_weight * old_momented_grad_f;
+        u_unnorm = u - momented_gradf; % gradient descent step
+
+        norm_u = norm(u_unnorm); % project u_unnorm to the L2 unit ball
+        if (norm_u > 1)
+            u = u_unnorm / norm_u;
+        else
+            u = u_unnorm;   % allow solution to exist in L2 ball (for dca_one_stoch)
+        end
 
 
-
-    N = size(X,1);  % number of neurons
-    T = size(X,2);  % number of timepoints
-
-    % PRE-PROCESSING
-    % compute all combinations of differences and their outer-product 
-
-    if (sum(var(X')) < 1e-10) % X has little variability left
-        u = randn(N,1);
-        u = u / norm(u);
-        R = get_D_uXij(u);
-
-        return;
-    end
-
-
-    % OPTIMIZATION
-    u = u_0;    % set u to be initial guess
-
-
-    % COMPUTE GRAD DESCENT PARAMETERS
-    D_uXij = get_D_uXij(u);  % get distance matrix of current u
-    gradf = get_gradf(u, D_uXij);
-
-    
-    % PERFORM PROJECTED GRAD DESCENT
-    momentum_weight = 1 - learning_rate;  % momentum term convex combination of learning_rate
-    momented_gradf = learning_rate * gradf + momentum_weight * old_momented_grad_f;
-    u_unnorm = u - momented_gradf; % gradient descent step
-    
-
-    norm_u = norm(u_unnorm); % project u_unnorm to the L2 unit ball
-    if (norm_u > 1)
-        u = u_unnorm / norm_u;
-    else
-        u = u_unnorm;   % need to consider cases inside the L2 unit ball as well (to make convex candidate set)
-    end
-
-
-
-    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    % NESTED DCA_ONE_STOCH HELPER FUNCTIONS
-    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % NESTED DCA_ONE_STOCH HELPER FUNCTIONS %
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
     function D = get_D_uXij(u) 
         % compute distance matrix of (X projected onto u)
         
         D = squareform(pdist((u' * X)'));
-        
     end
-
-
 
     function gradf = get_gradf(u, D_uXij)
+        % computes the gradient for dca_one_stoch...note there are some tricky matrix operations in here!
+        
+        %%% weight Xij
+            D_uXij(D_uXij == 0) = 1e-8; % add 1e-8 to avoid division by zero...other values
+                                        % do not seem to matter
+            % project Xij onto u
+            XijT_u = Xij' * u;
+        
+            % weight Xij by XijT_u ./ D_uXij(:)'
+            Xij_weighted = bsxfun(@times, Xij, (XijT_u ./ D_uXij(:))');
 
-        % first weight each i,jth element of XijXijT by 1/distance
-        D_uXij(D_uXij == 0) = 1e-8;  % add 1e-8 to avoid division by zero
-        
-        % project Xij onto u
-        XijT_u = Xij' * u;
-        
-        % weight Xij by XijT_u ./ D_uXij(:)'
-        Xij_weighted = bsxfun(@times, Xij, (XijT_u ./ D_uXij(:))');
-        
+        %%% subtract raw, column, and matrix means
+            Xij_row_means = blockproc(Xij_weighted, [N, T], @get_row_means);
+            Xij_col_means = Xij_row_means(:,column_indices);
+            Xij_matrix_mean = mean(Xij_weighted,2);
 
-        % subtract row, column, and matrix means
-        Xij_row_means = blockproc(Xij_weighted, [N, T], @get_row_means);
+            Xij_weighted = bsxfun(@plus, Xij_weighted - Xij_row_means - Xij_col_means, Xij_matrix_mean);
 
-        Xij_col_means = Xij_row_means(:,column_indices);
-        Xij_matrix_mean = mean(Xij_weighted,2);
-        
-        
-        Xij_weighted = bsxfun(@plus, Xij_weighted - Xij_row_means - Xij_col_means, Xij_matrix_mean);
-        
-
-        % now need to linearly combine with B (similar way as with D)
-        gradf = - Xij_weighted * R_combined(:);
-
+        %%% linearly combine with R_combined
+            gradf = - Xij_weighted * R_combined(:);  % sign because we are minimizing negative dcov
     end
 
-
-
     function X_row = get_row_means(block_struct)
+        % for blockproc, compute means along rows of distance matrix
+        
         X_row = mean(block_struct.data,2);
         X_row = repmat(X_row, 1, size(block_struct.data,2));
     end
-
-
 end
