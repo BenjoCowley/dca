@@ -11,6 +11,54 @@ def dca(Xs, Ds = [], num_iters_per_dataset = 1, num_iters_foreach_dim = 30,
         percent_increase_criterion = 0.01, num_dca_dimensions = [], 
         num_stoch_batch_samples = 0, num_samples_to_compute_stepwise_dcov = 1000,
         u_0s = []):
+#  U, dcovs = dca(Xs, ...)
+#
+#  DESCRIPTION:
+#   DCA identifies linear projections in sets of variables that are related to one
+#       another, linearly or nonlinearly.  DCA returns a loading matrix U[iset] for each
+#       set of variables, as well as the distance covariances dcovs for each dimension.
+#
+#  INPUTS:
+#   Xs: (1 x M list), data, M datasets where Xs[iset] is (num_variables x num_samples) ndarray
+#                   Note: Each set can have a different number of variables,
+#                   but must have the same number of samples.
+#   Ds (optional): (1 x N list), distance matrices of N datasets for which dimensions
+#                   are *not* identified, but are related to dimensions of Xs.
+#                   Ds[iset] is (num_samples x num_samples), and must have the same
+#                   number of samples as those in Xs
+#
+#   Additional (optional) arguments:
+#       num_iters_per_dataset: (1 x 1), number of optimization iterations for each dataset; default: 1
+#       num_iters_foreach_dim: (1 x 1), number of optimization iterations for each dimension; default: 30
+#       percent_increase_criterion (1 x 1 scalar, between 0 and 1), if objective value of next iteration
+#                               does not surpass a fraction of the previous objective value, stop optimizaiton;
+#                               default: 0.01
+#       num_dca_dimensions: (1 x 1), number of dimensions to optimize; default: num_variables
+#       num_stoch_batch_samples: (1 x 1), number of samples in minibatch for stochastic gradient
+#                       descent; default: 0
+#                       Note: A nonzero value for this option triggers stochastic gradient descent.
+#                       Use for large datasets (e.g., num_vars > 100, num_samples > 5000). A good
+#                       default: 100 samples.
+#       num_samples_to_compute_stepwise_dcov: (1 x 1), for stochastic gradient descent, number 
+#                       of samples used to compute dcovs (for visualization purposes); default: 1000 
+#
+#  OUTPUTS:
+#   U: (1 x M list), orthonormal loading matrices for M datasets in Xs.
+#               U[iset] is (num_variables x num_dca_dimensions).
+#   dcovs: (1 x num_dca_dimensions list), distance covariances for each dimension identified by DCA
+#
+#  EXAMPLE:
+#   import numpy as np
+#   from scipy.spatial.distance import pdist, squareform
+#   Xs = [];
+#   Xs.append(np.random.randn(20,1000));
+#   Xs.append(np.square(Xs[0][1:5,:]));
+#   Ds = [];
+#   Ds.append(squareform(pdist(X[0][1,:].transpose() + Xs[1][1,:].transpose())));
+#   U, dcovs = dca(Xs, Ds = Ds, num_dca_dimensions = 5, percent_increase_criterion = 0.05);
+#   U, dcovs = dca(Xs, Ds = Ds, num_dca_dimensions = 5, num_stoch_batch_samples = 100, 
+#                   num_samples_to_compute_stepwise_dcov = 500, num_iters_foreach_dim = 20);
+#   
 
             
     ### pre-processing
@@ -25,15 +73,19 @@ def dca(Xs, Ds = [], num_iters_per_dataset = 1, num_iters_foreach_dim = 30,
 
         num_dca_dimensions = results['num_dca_dimensions'];
         num_datasets = results['num_datasets'];
+        num_samples = results['num_samples'];
         R_given = results['R_given'];
         dcovs = results['dcovs'][0];
         U_orth = results['U_orth']; 
         U = results['U'];   # list, dca dimensions for each dataset
+        Xs = results['Xs'];
         Xs_orig = results['Xs_orig'];
         Xij_orig = results['Xij_orig'];
         Xij = results['Xij'];
         col_indices = results['col_indices'];
         D_given = results['D_given'];
+        
+
 
 
     ### optimization
@@ -41,7 +93,7 @@ def dca(Xs, Ds = [], num_iters_per_dataset = 1, num_iters_foreach_dim = 30,
 
             print "dca dimension {}".format(idim+1);
 
-            u, momented_gradf, R, total_dcov, total_dcov_old, results = initialization(Xs, u_0s, results);  
+            u, momented_gradf, R, total_dcov, total_dcov_old, stoch_learning_rate, results = initialization(Xs, u_0s, results);  
                     # compute re-centered distance matrices based on u and update stoch grad parameters
 
 
@@ -87,16 +139,19 @@ def dca(Xs, Ds = [], num_iters_per_dataset = 1, num_iters_foreach_dim = 30,
 
                         sys.stdout.write('.');
 
-                        window = range(batch_indices[ibatch], batch_indices[ibatch+1]-1);
+                        window = np.arange(batch_indices[ibatch], batch_indices[ibatch+1]);
                         sample_indices = random_sample_indices[window];
 
                         R = [];
                         for iset in range(num_datasets):
-                            R[iset] = get_recentered_matrix(u[iset], Xs[iset][:,sample_indices]);
+                            R.append(get_recentered_matrix(u[iset], Xs[iset][:,sample_indices]));
 
                         for iset in range(num_datasets):
-                            indices = [i for i in range(num_datasets) if i != r[iset]];
-                            R_combined_sampled = get_recentered_combined(R[indices], R_given[sample_indices, sample_indices]);
+                            Rtemp = R[:];
+                            del Rtemp[r[iset]];
+                            R_giventemp = R_given[:, sample_indices];
+                            R_giventemp = R_giventemp[sample_indices,:];
+                            R_combined_sampled = get_recentered_combined(Rtemp, R_giventemp);
                             Xij_sampled = get_Xij_randomlysampled(Xs[r[iset]][:,sample_indices]);
 
                             # perform optimization for one dataset
@@ -244,7 +299,8 @@ def preprocessing(Xs, Ds, num_dca_dimensions, num_stoch_batch_samples):
 # compute any fixed variables before optimization, and initialize any needed book-keeping quantities
 
     ### declare numbers of quantities
-        Xs_orig = Xs[:];  # Xs_orig will remain the original Xs, since Xs will change during optimization
+        Xs_orig = Xs;  # Xs_orig will remain the original Xs, since Xs will change during optimization
+        Xs = Xs_orig[:];  
 
         num_datasets = len(Xs);
         num_samples = Xs[0].shape[1];
@@ -303,8 +359,9 @@ def preprocessing(Xs, Ds, num_dca_dimensions, num_stoch_batch_samples):
 
 
     ###  compute Xij (num_variables x num_samples^2) for each dataset, where Xij = X_i - X_j
+        Xij_orig = [];
+        Xij = [];
         if (num_stoch_batch_samples == 0):    # compute only for full gradient descent
-            Xij = [];
             for iset in range(0,num_datasets):
                 # compute all combinations of differences between samples of Xs
                 #    this is some fancy footwork in order to compute quickly...
@@ -316,10 +373,10 @@ def preprocessing(Xs, Ds, num_dca_dimensions, num_stoch_batch_samples):
                 Xij.append(X);
             Xij_orig = Xij[:];
 
-        return {'num_datasets':num_datasets, 'Xs_orig':Xs_orig, 'num_dca_dimensions':num_dca_dimensions, 
+        return {'num_datasets':num_datasets, 'Xs':Xs, 'Xs_orig':Xs_orig, 'num_dca_dimensions':num_dca_dimensions, 
                 'D_given':D_given, 'U':U, 'U_orth':U_orth, 'dcovs':dcovs, 'Xij_orig':Xij_orig, 'Xij':Xij,
                 'num_stoch_batch_samples':num_stoch_batch_samples, 'R_given':R_given, 'dcovs':dcovs,
-                'col_indices':col_indices}
+                'col_indices':col_indices, 'num_samples':num_samples}
 
 
 
@@ -343,8 +400,8 @@ def initialization(Xs, u_0s, results):
                 u.append(orth(np.random.randn(num_vars, 1)));
 
     ### get initial recentered matrices for each dataset based on u
+        R = [];
         if (results['num_stoch_batch_samples'] == 0): # only for full gradient descent
-            R = [];
             for iset in range(num_datasets):
                 R.append(get_recentered_matrix(u[iset], Xs[iset]));
 
@@ -354,17 +411,15 @@ def initialization(Xs, u_0s, results):
 
     ### stochastic gradient descent initialization
         momented_gradf = [];
+        stoch_learning_rate = 1;  # initial learning rate for SGD
         if (results['num_stoch_batch_samples'] > 0):
-            stoch_learning_rate = 1; # initial learning rate for SGD
             for iset in range(num_datasets):
-                momented_gradf.append(np.zeros(u[iset].shape[0]));
+                momented_gradf.append(np.zeros(u[iset].shape));
 
-            total_dcov = get_total_dcov_randomlysampled(u, X, D_given, results);
+            total_dcov = get_total_dcov_randomlysampled(u, Xs, results['D_given'], results);
             total_dcov_old = total_dcov * 0.5;
 
-            results['stoch_learning_rate'] = stoch_learning_rate;
-
-        return u, momented_gradf, R, total_dcov, total_dcov_old, results;
+        return u, momented_gradf, R, total_dcov, total_dcov_old, stoch_learning_rate, results;
 
 
 
@@ -396,7 +451,7 @@ def get_total_dcov(R, D_given):
         T = R[0].shape[0]; # number of samples
         for iset in range(len(R)):
             for jset in range(iset+1,len(R)):
-                Rtotal = Rtotal + np.sqrt(np.dot(np.float64(1)/(T ** 2), np.dot(R[iset].flatten('F'), R[jset].flatten('F'))));
+                Rtotal = Rtotal + np.sqrt(np.dot(1.0/(T ** 2), np.dot(R[iset].flatten('F'), R[jset].flatten('F'))));
                     # Rtotal = Rtotal + sqrt(1/T^2 * R{iset}(:)' * R{jset}(:));
 
 
@@ -421,13 +476,15 @@ def get_total_dcov_randomlysampled(u, Xs, D_given, results):
             R.append(get_recentered_matrix(u[iset], Xs[iset][:,sample_indices]));
 
         for iset in range(len(D_given)):
-            R.append(D_given[iset][sample_indices,sample_indices]);
+            Dtemp = D_given[iset][sample_indices,:];
+            Dtemp = Dtemp[:,sample_indices];
+            R.append(Dtemp);
                 # this is an approximation, we would really need to re-compute the re-centered distance matrix for each D_given
 
         Rtotal = 0;
         for iset in range(len(R)):
             for jset in range(iset+1,len(R)):
-                Rtotal = Rtotal + np.sqrt(np.dot(1.0/T**2, np.dot(R[iset].flatten(), R[jset].flatten())));
+                Rtotal = Rtotal + np.sqrt(np.dot(1.0/T**2, np.dot(R[iset].flatten('F'), R[jset].flatten('F'))));
                     # Rtotal = Rtotal + sqrt(1/T^2 * R{iset}(:)' * R{jset}(:));  
 
         total_dcov = Rtotal / ((len(R)-1) * len(R) / 2);
@@ -491,12 +548,13 @@ def get_Xij_randomlysampled(X):
 
     # compute all combinations of differences between samples of X
         num_vars = X.shape[0];
-        X = X[..., None];
-        X = np.transpose(X, (0,2,1));
-        X = X[..., None] - X;
+        Xreshaped = X[..., None];
+        Xreshaped = np.transpose(Xreshaped, (0,2,1));
+        X = X[..., None] - Xreshaped;
         Xij_sampled = -np.reshape(X, (num_vars, -1), order='F');
 
         return Xij_sampled;
+
 
 
 
@@ -648,7 +706,7 @@ def get_Gt(u, gradf, t):
     return Gt
 
 
-"""
+
 
 
 
@@ -656,11 +714,56 @@ def get_Gt(u, gradf, t):
 ##  DCA_ONE STOCH  - STOCHASTIC GRADIENT DESCENT ##
 ###################################################
 
+def dca_one_stoch(X, Xij, R_combined, u_0, learning_rate, old_momented_grad_f, column_indices):
+    # performs distance covariance analysis for one dataset and one given re-centered distance matrix
+    #       uses stochastic projected gradient descent
+    #
+    #  INPUT:
+    #   X: (N x T), data in which we want to find the (N x 1) dca dimension, where
+    #               N is the number of variables, and T is the number of samples
+    #   R_combined: (T x T), combined re-centered distance matrix of the other sets of variables
+    #   u_0: (N x 1), initial guess for the dca dimension
+    #   learning_rate: (1 x 1), current learning rate for stochastic gradient descent
+    #   old_momented_grad_f: (N x 1), previous gradient direction (used for momentum)
+    #   column_indices: (1 x T^2), used to subtract out the column means of the gradient
+    #
+    #  OUTPUT:
+    #   u: (N x 1), the dimension of greatest distance covariance between D_X and R_combined
+    #   momented_gradf: (N x 1), needed to keep momentum terms during alternating optimization
 
 
+    ### Pre-processing
+        N = X.shape[0];
+        T = X.shape[1];
 
-# NOTES:
-# notes on converting matlab structs to python structs:
-#           https://docs.scipy.org/doc/numpy/user/basics.rec.html
+        if (np.sum(np.var(X,axis=1)) < 1e-10): # check if X has little variability left
+            u = np.random.randn(N,1);
+            u = u / norm(u);
+            momented_gradf = zeros(u.shape);
+            return u, momented_gradf;
 
-"""
+        u = u_0;  # set u to be the initial guess
+        
+
+    ### Optimization
+
+        # Compute gradient descent parameters
+        momentum_weight = 1.0 - learning_rate;  # momentum term convex combination of learning rate
+        D_uXij = get_D_uXij(u, X);  # get distance matrix of current u
+
+        # perform projected gradient descent with momentum
+        gradf = get_gradf(u, D_uXij, Xij, R_combined, N, T, column_indices);
+                        # works better than Nesterov accelerated gradient
+
+        momented_gradf = learning_rate * gradf + momentum_weight * old_momented_grad_f;
+        u_unnorm = u - momented_gradf;  # gradient descent step
+
+
+        norm_u = norm(u_unnorm);  # project u_unnorm to the L2 unit ball
+        if (norm_u > 1.0):
+            u = u_unnorm / norm_u;
+        else:
+            u = u_unnorm;  # allow solution to exist in L2 ball (for dca_one_stoch)
+
+        return u, momented_gradf;
+
