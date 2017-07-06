@@ -206,7 +206,7 @@ function [U, dcovs] = dca(Xs, varargin)
         default_num_samples_to_compute_stepwise_dcov = 1000;
         
         addRequired(p, 'X');
-        addOptional(p, 'D', default_D);
+        addOptional(p, 'Ds', default_D);
         addParamValue(p, 'num_iters_per_dataset', default_num_iters_per_dataset);
         addParamValue(p, 'num_iters_foreach_dim', default_num_iters_foreach_dim);
         addParamValue(p, 'percent_increase_criterion', default_percent_increase_criterion);
@@ -223,18 +223,18 @@ function [U, dcovs] = dca(Xs, varargin)
     end
 
     function check_input(p)
-        % make sure user input correct formats
+        % make sure user inputs correct formats
         
         %%% check X
             if (~iscell(p.Results.X) || size(p.Results.X,1) > 1 && size(p.Results.X,2) > 1) % check if X is a cell vector  
-                error('X (1 x num_datasets) should be a cell array, where X{iset} is (num_variables x num_datapoints)');
+                error('Xs (1 x num_datasets) should be a cell array, where Xs{iset} is (num_variables x num_datapoints)');
             end
             
             num_datasets = length(p.Results.X);
             
-            [num_vars, num_datapoints] = cellfun(@size, p.Results.X);
-            if (length(unique(num_datapoints)) ~= 1)  % there should only be one sample size
-                error('Dataset(s) in X do not contain the same number of datapoints. X{iset} (num_variables x num_datapoints), where num_datapoints is the same for each dataset (but num_variables can be different).');
+            [num_vars, num_samples] = cellfun(@size, p.Results.X);
+            if (length(unique(num_samples)) ~= 1)  % there should only be one sample size
+                error('Dataset(s) in Xs do not contain the same number of samples. Xs{iset} (num_variables x num_samples), where num_samples is the same for each dataset (but num_variables can be different).');
             end
             num_samples = size(p.Results.X{1},2);
             
@@ -243,25 +243,45 @@ function [U, dcovs] = dca(Xs, varargin)
                 isnan_found = isnan_found | any(any(isnan(p.Results.X{iset})));
             end
             if (isnan_found == true)
-                error('Dataset(s) in X contain NaNs. Remove samples with NaNs.');
+                error('Dataset(s) in Xs contain NaNs. Remove samples with NaNs.');
             end
             
-        %%% check D
-            if (~isempty(p.Results.D) && (~iscell(p.Results.D) || size(p.Results.D, 1) > 1 && size(p.Results.D, 2) > 1))
-                error('Dataset(s) in D do not contain the same number of datapoints. D{iset} (num_datapoints x num_datapoints) are distance matrices, where num_datapoints is the same for each dataset.');
+        %%% check Ds
+            if (~isempty(p.Results.Ds) && (~iscell(p.Results.Ds) || size(p.Results.Ds, 1) > 1 && size(p.Results.Ds, 2) > 1))
+                erorr('Ds should either be empty (Ds = []) or a cell vector');
             end
             
-            isnan_found = false;
-            for iset = 1:length(p.Results.D)
-                isnan_found = isnan_found | any(any(isnan(p.Results.D{iset})));
-            end
-            if (isnan_found == true)
-                error('Dataset(s) in D contain NaNs. Remove samples with NaNs.');
+            if (length(p.Results.Ds) > 0)
+                [num_samples1, num_samples2] = cellfun(@size, p.Results.Ds);
+                if (length(unique([num_samples1, num_samples2])) ~= 1)
+                    error('Dataset(s) in Ds do not contain the same number of samples. Ds{iset} (num_samples x num_samples) are distance matrices, where num_samples is the same for each dataset.');
+                end
+
+                isnan_found = false;
+                for iset = 1:length(p.Results.Ds)
+                    isnan_found = isnan_found | any(any(isnan(p.Results.Ds{iset})));
+                end
+                if (isnan_found == true)
+                    error('Dataset(s) in Ds contain NaNs. Remove samples with NaNs.');
+                end
+
+                isneg_found = false;
+                for iset = 1:length(p.Results.Ds)
+                    isneg_found = isneg_found | any(any(p.Results.Ds{iset} < 0));
+                end
+                if (isneg_found == true)
+                    error('Dataset(s) in Ds contain negative values. Ds{iset} is a distance matrix with nonnegative values.');
+                end
             end
             
         %%% check that X and D have more than just one dataset combined
-            if (length(p.Results.X) + length(p.Results.D) <= 1)
-                error('Not enough datasets in X and D.  The number of datasets (including given distance matrices) should be at least two.');
+            if (length(p.Results.X) + length(p.Results.Ds) <= 1)
+                error('Not enough datasets in Xs and Ds.  The number of datasets (including given distance matrices) should be at least two.');
+            end
+            
+        %%% check that X and D have the same number of samples
+            if (~isempty(p.Results.Ds) && num_samples ~= num_samples1)
+                error('Dataset(s) in Xs do not have the same number of samples as those in Ds.  They should be the same.');
             end
             
         %%% check num_dca_dimensions
@@ -292,9 +312,8 @@ function [U, dcovs] = dca(Xs, varargin)
 
         %%% compute the combined recentered matrices for given distance matrices
             R_given = zeros(num_samples);
-            D_given = p.Results.D;
+            D_given = p.Results.Ds;
             if (~isempty(D_given))
-                R_given = zeros(num_samples);
                 for iset = 1:length(D_given)
                     H = eye(size(D_given{iset})) - 1 / size(D_given{iset},1) * ones(size(D_given{iset}));
                     D_given{iset} = H * D_given{iset} * H;  % recenter D
@@ -319,7 +338,7 @@ function [U, dcovs] = dca(Xs, varargin)
 
         %%% initialize parameters
             U = cell(1,num_datasets); % cell vector, dca dimensions for each dataset
-            dcovs = zeros(1,num_dca_dims); % vectors, dcovs for each dimension
+            dcovs = zeros(1,num_dca_dims); % vector, dcovs for each dimension
             for iset = 1:num_datasets
                 U_orth{iset} = eye(size(X{iset},1));  % keeps track of the orthogonal space of u
             end
@@ -390,7 +409,7 @@ function R = get_recentered_matrix(u, X)
     % u: (num_variables x 1),  weight vector
     % X: (num_variables x num_datapoints), one dataset
 
-    % compute distance matrix of (X projected onto u
+    % compute distance matrix of X projected onto u
         D = squareform(pdist((u' * X)'));
         
     % now recenter it
@@ -435,7 +454,7 @@ function total_dcov = get_total_dcov_randomlysampled(u, X, D_given, p)
     end
 
     for iset = 1:length(D_given)
-        R{iset + length(X)} = D_given{iset}(sample_indices, sample_indices);
+        R{iset + length(X)} = D_given{iset}(sample_indices, sample_indices);  % this is an approximation, we would really need to re-compute the re-centered distance matrix for each D_given
     end
     
     Rtotal = 0;
@@ -476,21 +495,23 @@ end
 
 
 function R_combined = get_recentered_combined(R, R_given)
-    % compute the combined matrix of all recentered distance matrices
+    % compute the combined matrix of all re-centered distance matrices
     % returns a matrix, where each element is a pointwise-sum of all R
-    % and D (remember, D is already re-centered)
-
-    if (~isempty(R))
-        R_combined = zeros(size(R{1}));  % if no given distance matrices, then R_given is zero matrix
-                            % R_given is already averaged across given datasets
+    % and R_given (remember, R_given is already re-centered)
+    
+    % initialize R_combined as a zero matrix
+    if (~isempty(R))  
+        R_combined = zeros(size(R{1}));  
     else
-        R_combined = zeros(size(R_given));
+        R_combined = zeros(size(R_given));  % 
     end
     
+    % iterate and add through R
     for iset = 1:length(R)
         R_combined = R_combined + R{iset}/length(R);
     end
     
+    % incorporate R_given, if given
     if (~all(all(R_given==0))) % if R_given ~= 0, then D_given exists
         R_combined = (R_combined + R_given)/2;
     end
@@ -610,7 +631,7 @@ function u = dca_one(X, Xij, R_combined, u_0, column_indices, p)
             % weight Xij by XijT_u ./ D_uXij(:)'
             Xij_weighted = bsxfun(@times, Xij, (XijT_u ./ D_uXij(:))');
 
-        %%% subtract raw, column, and matrix means
+        %%% subtract row, column, and matrix means
             Xij_row_means = blockproc(Xij_weighted, [N, T], @get_row_means);
             Xij_col_means = Xij_row_means(:,column_indices);
             Xij_matrix_mean = mean(Xij_weighted,2);
@@ -628,6 +649,14 @@ function u = dca_one(X, Xij, R_combined, u_0, column_indices, p)
         X_row = repmat(X_row, 1, size(block_struct.data,2));
     end
 
+    function status = backtrack_check(u, f_next, gradf, t)
+        % check lecture 8 of ryan tibshirani opti class
+        Gt = get_Gt(u, gradf, t);
+
+        D_uXij_t = get_D_uXij(u - t * Gt);
+        status = get_f(D_uXij_t) > f_next - t * gradf' * Gt + t/2 * Gt' * Gt;
+    end
+
     function Gt = get_Gt(u, gradf, t)
         % vector used for backtracking check with projected gradient descent
         
@@ -640,14 +669,6 @@ function u = dca_one(X, Xij, R_combined, u_0, column_indices, p)
         end
 
         Gt = 1/t * (u - u_norm);
-    end
-
-    function status = backtrack_check(u, f_next, gradf, t)
-        % check lecture 8 of ryan tibshirani opti class
-        Gt = get_Gt(u, gradf, t);
-
-        D_uXij_t = get_D_uXij(u - t * Gt);
-        status = get_f(D_uXij_t) > f_next - t * gradf' * Gt + t/2 * Gt' * Gt;
     end
 end
 
@@ -736,7 +757,7 @@ function [u, momented_gradf] = dca_one_stoch(X, Xij, R_combined, u_0, learning_r
             % weight Xij by XijT_u ./ D_uXij(:)'
             Xij_weighted = bsxfun(@times, Xij, (XijT_u ./ D_uXij(:))');
 
-        %%% subtract raw, column, and matrix means
+        %%% subtract row, column, and matrix means
             Xij_row_means = blockproc(Xij_weighted, [N, T], @get_row_means);
             Xij_col_means = Xij_row_means(:,column_indices);
             Xij_matrix_mean = mean(Xij_weighted,2);
