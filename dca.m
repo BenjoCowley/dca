@@ -22,15 +22,15 @@ function [U, dcovs] = dca(Xs, varargin)
 %       'num_iters_foreach_dim': (1 x 1 scalar), number of optimization
 %           iterations for each dimension; default: 30
 %       'percent_increase_criterion': (1 x 1 scalar between 0 and 1),
-%           if next objective value of next iteration does not surpass
+%           if objective value of next iteration does not surpass
 %           a fraction of the previous object value, stop optimization;
 %           default: 0.01
 %       'num_dca_dimensions': (1 x 1 scalar), number of dimensions to
 %           optimize; default: num_variables
 %       'num_stoch_batch_samples': (1 x 1 scalar), number of samples
 %           in minibatch for stochastic gradient descent; default: 0
-%           Note: A value for this option triggers stochastic gradient
-%           descent. Use for large datasets (e.g., num_vars > 100, 
+%           Note: A nonzero value for this option triggers stochastic 
+%           gradient descent. Use for large datasets (e.g., num_vars > 100, 
 %           num_samples > 5000). A good default: 100 samples.
 %       'num_samples_to_compute_stepwise_dcov': (1 x 1 scalar), for
 %           stochastic gradient descent, number of samples used to compute
@@ -48,7 +48,7 @@ function [U, dcovs] = dca(Xs, varargin)
 %   Ds{1} = squareform(pdist(Xs{1}(1,:)' + Xs{2}(1,:)'));
 %   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 10, 'percent_increase_criterion', 0.1);
 %   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 5, 'num_stoch_batch_samples', 100, ...
-%                   'num_samples_to_compute_stepwise_dcov', 1500, 'num_iters_foreach_dim', 20);
+%                   'num_samples_to_compute_stepwise_dcov', 500, 'num_iters_foreach_dim', 20);
 %
 %
 % Reference: 
@@ -707,8 +707,7 @@ function [u, momented_gradf] = dca_one_stoch(X, Xij, R_combined, u_0, learning_r
         if (sum(var(X')) < 1e-10) % X has little variability left
             u = randn(N,1);
             u = u / norm(u);
-            R = get_D_uXij(u);
-
+            momented_gradf = [];
             return;
         end
 
@@ -720,10 +719,9 @@ function [u, momented_gradf] = dca_one_stoch(X, Xij, R_combined, u_0, learning_r
         momentum_weight = 1 - learning_rate;  % momentum term convex combination of learning_rate
         D_uXij = get_D_uXij(u);  % get distance matrix of current u
 
-        % momentum
-        gradf = get_gradf(u, D_uXij);   % worked better than Nesterov accelerated gradient
 
         % PERFORM PROJECTED GRAD DESCENT
+        gradf = get_gradf(u, D_uXij);   % worked better than Nesterov accelerated gradient
         momented_gradf = learning_rate * gradf + momentum_weight * old_momented_grad_f;
         u_unnorm = u - momented_gradf; % gradient descent step
 
