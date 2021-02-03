@@ -62,7 +62,7 @@ function [U, dcovs] = dca(Xs, varargin)
 %       covariance analysis." In AISTATS, pp. 242-251, 2017.
 %
 % Author: Benjamin R. Cowley, March 2017, bcowley@cs.cmu.edu
-%   updated Jan 2021
+%   updated Jan 2021 for Matlab 2020b
 
 
     % X_orig = [];
