@@ -19,3 +19,5 @@ x1 = U{1}(:,1)' * Xs{1}
 x2 = U{2}(:,1)' * Xs{2}
 plot(x1, x2, '.k'); xlabel('DCA dim 1 for X1'); ylabel('DCA dim 1 for X2')
 ```
+
+<img src="./figures/dca_example_x1_vs_x2.png">
