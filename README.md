@@ -4,7 +4,6 @@ Distance Covariance Analysis
 This readme will be updated soon with a user-friendly way to run DCA!
 
 Reference:
-
 "Distance covariance analysis." BR Cowley, JD Semedo, A Zandvakili, A Kohn, MA Smith, BM Yu (*AISTATS*, pp. 242-251, 2017).
 
 # Example code (Matlab)
