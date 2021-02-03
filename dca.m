@@ -8,15 +8,17 @@ function [U, dcovs] = dca(Xs, varargin)
 %       dcovs for each dimension.
 %
 % INPUTS:
-%   Xs: (1 x M cell), data, M datasets where Xs{iset} is num_variables x num_samples
+%   Xs: (1 x M cell), data, M datasets where Xs{iset} is (num_variables x num_samples)
 %           Note: Each set can have a different number of variables,
-%           but must have the same number of samples.
+%           but must have the same number of (paired) samples.
 %   Ds (optional): (1 x N cell), distance matrices of N datasets for which dimensions
 %           are *not* identified, but are related to dimensions of Xs
 %           Ds{jset} is num_samples x num_samples  (and must have the same
 %           number of samples as those in Xs
 %   
 %   Additional (optional) arguments:
+%       'num_dca_dimensions': (1 x 1 scalar), number of dimensions to
+%           optimize; default: num_variables
 %       'num_iters_per_dataset': (1 x 1 scalar), number of optimization
 %           iterations for each dataset; default: 1
 %       'num_iters_foreach_dim': (1 x 1 scalar), number of optimization
@@ -25,8 +27,6 @@ function [U, dcovs] = dca(Xs, varargin)
 %           if objective value of next iteration does not surpass
 %           a fraction of the previous object value, stop optimization;
 %           default: 0.01
-%       'num_dca_dimensions': (1 x 1 scalar), number of dimensions to
-%           optimize; default: num_variables
 %       'num_stoch_batch_samples': (1 x 1 scalar), number of samples
 %           in minibatch for stochastic gradient descent; default: 0
 %           Note: A nonzero value for this option triggers stochastic 
@@ -46,7 +46,13 @@ function [U, dcovs] = dca(Xs, varargin)
 %   Xs{1} = randn(20,1000);
 %   Xs{2} = Xs{1}(1:5,:).^2;
 %   Ds{1} = squareform(pdist(Xs{1}(1,:)' + Xs{2}(1,:)'));
-%   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 10, 'percent_increase_criterion', 0.1);
+%   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 5);
+%   % plot first DCA dimension in Xs{1} vs Xs{2}
+%   x1 = U{1}(:,1)' * Xs{1}
+%   x2 = U{2}(:,1)' * Xs{2}
+%   plot(x1, x2, '.k'); xlabel('DCA dim 1 for Xs{1}'); ylabel('DCA dim 1 for Xs{2}')
+%
+% EXAMPLE for SGD (large datasets):
 %   [U, dcovs] = dca(Xs, Ds, 'num_dca_dimensions', 5, 'num_stoch_batch_samples', 100, ...
 %                   'num_samples_to_compute_stepwise_dcov', 500, 'num_iters_foreach_dim', 20);
 %
@@ -56,10 +62,22 @@ function [U, dcovs] = dca(Xs, varargin)
 %       covariance analysis." In AISTATS, pp. 242-251, 2017.
 %
 % Author: Benjamin R. Cowley, March 2017, bcowley@cs.cmu.edu
+%   updated Jan 2021
 
 
+    % X_orig = [];
+    % Xij_orig = [];
+    % num_datasets = 0;
+    % num_samples = 0;
+    % num_dca_dims = 0;
+    % R_given = [];
+    % D_given = [];
+    % col_indices = [];
 
     %%% pre-processing
+        global X_orig Xij_orig num_datasets num_samples num_dca_dims R_given D_given col_indices
+            % currently used as global. Future update will move these to a pass-by-reference struct.
+
         p = parse_input(Xs, varargin);   % allows user to input name-value pairs
 
         check_input(p);  % checks user input, outputing warnings
@@ -400,7 +418,7 @@ end
 
 
 %%%%%%%%%%%%%%%%%%%%%%%
-%  NON-NESTED FUCNTIONS
+%  NON-NESTED FUNCTIONS
 %%%%%%%%%%%%%%%%%%%%%%%
 
 
